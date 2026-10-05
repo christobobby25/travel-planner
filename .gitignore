@@ -1,0 +1,17 @@
+# Secrets
+.env
+.env.local
+
+# Python
+.venv*/
+__pycache__/
+*.pyc
+
+# CDK build output (infra/)
+infra/.build/
+infra/cdk.out/
+
+# Deprecated starter toolkit config
+.bedrock_agentcore.yaml
+
+.DS_Store

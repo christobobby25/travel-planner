@@ -1,0 +1,17 @@
+{
+  "targets": {
+    "default": {
+      "resources": {
+        "runtimes": {
+          "travelplanner": {
+            "runtimeId": "TravelPlanner_travelplanner-ywLp1m3skU",
+            "runtimeArn": "arn:aws:bedrock-agentcore:us-east-1:710809468226:runtime/TravelPlanner_travelplanner-ywLp1m3skU",
+            "roleArn": "arn:aws:iam::710809468226:role/AgentCore-TravelPlanner-d-ApplicationAgentTravelpla-g6VDDfq8KFjF"
+          }
+        },
+        "stackName": "AgentCore-TravelPlanner-default",
+        "deployHash": "e527781301fa08d6"
+      }
+    }
+  }
+}

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://schema.agentcore.aws.dev/v1/agentcore.json",
+  "name": "TravelPlanner",
+  "version": 1,
+  "managedBy": "CDK",
+  "tags": {
+    "agentcore:created-by": "agentcore-cli",
+    "agentcore:project-name": "TravelPlanner"
+  },
+  "runtimes": [
+    {
+      "name": "travelplanner",
+      "description": "Supervisor routing to flight, hotel and weather specialists",
+      "build": "CodeZip",
+      "entrypoint": "agentcore_app.py",
+      "codeLocation": "./",
+      "runtimeVersion": "PYTHON_3_13",
+      "networkMode": "PUBLIC",
+      "protocol": "HTTP",
+      "envVars": [
+        {
+          "name": "BEDROCK_MODEL_ID",
+          "value": "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+        },
+        {
+          "name": "TRAVEL_SECRET_ID",
+          "value": "travelagent"
+        }
+      ],
+      "additionalPolicies": [
+        "iam/read-travel-secret.json"
+      ]
+    }
+  ],
+  "memories": [],
+  "knowledgeBases": [],
+  "credentials": [],
+  "evaluators": [],
+  "onlineEvalConfigs": [],
+  "agentCoreGateways": [],
+  "policyEngines": [],
+  "configBundles": [],
+  "abTests": [],
+  "harnesses": [],
+  "datasets": [],
+  "capacityProviders": [],
+  "payments": []
+}

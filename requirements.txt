@@ -1,0 +1,12 @@
+strands-agents
+strands-agents-tools
+mcp
+httpx
+python-dotenv
+boto3
+langchain-aws
+langgraph
+langchain-mcp-adapters
+bedrock-agentcore
+bedrock-agentcore-starter-toolkit
+streamlit
