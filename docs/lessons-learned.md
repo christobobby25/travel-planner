@@ -1,87 +1,67 @@
-# Lessons learned
+# Lessons Learned
 
-Problems hit while building the travel planner, what caused them, and how they were fixed.
-Numbers are from real runs against Claude Haiku 4.5 on Bedrock.
+These are some of the main problems I ran into while building the travel planner, what was causing them, and how I fixed them. The performance numbers below are from actual runs using Claude Haiku 4.5 through Amazon Bedrock.
 
-## 1. The model didn't know today's date
+## 1. The agents didn't know the current date
 
-**Symptom.** "Hotels in Chicago Nov 12-16" searched **2024-11-12**, a date in the past. LiteAPI
-timed out on it and the hotel agent fell back to listing hotels without prices. "Weather next
-week" got a clarifying question because the agent couldn't tell which week.
+One of the first issues I noticed was that the agents had no reliable sense of today's date. For example, asking for `"Hotels in Chicago Nov 12-16"` resulted in a search for **2024-11-12**, which was already in the past. LiteAPI eventually timed out, and the hotel agent fell back to returning hotels without prices. Requests like `"weather next week"` had a similar problem because the agent couldn't reliably determine which week I meant.
 
-**Fix.** Every agent's system prompt gets today's date. In AgentCore the agents live in a
-long-running container, so a date baked in at startup would go stale; a Strands
-`BeforeInvocationEvent` hook refreshes it on every call ([agents/dates.py](../agents/dates.py)).
+I initially added the current date to each agent's system prompt. Since AgentCore can keep agents running inside a long-lived container, though, a date added only at startup would eventually become outdated.
 
-## 2. …and then it miscounted weekdays
+To handle that, I added a Strands `BeforeInvocationEvent` hook that refreshes the date before every request ([agents/dates.py](https://github.com/christobobby25/travel-planner/blob/main/agents/dates.py)).
 
-**Symptom.** With today's date in the prompt, "leaving next Thursday" (today: Monday Oct 5)
-still came out as Friday Oct 9, and "4 nights" as 3. The supervisor wrote dates as prose
-("Thursday October 9") when delegating, and computed them instead of looking them up.
+## 2. Giving the model the date still wasn't enough
 
-**Fix.** Give a lookup table instead of a fact to reason from: `next Thursday = 2026-10-08`,
-a two-week calendar, and a rule to pass every date to other agents as `YYYY-MM-DD`.
+Even after the agents knew today's date, I found that the model could still make simple calendar mistakes.
 
-**Measured.** Same request, supervisor with stubbed specialists, 5 runs each:
-plain calendar → wrong dates in **3/5**; lookup table + ISO rule → **0/5**.
+For example, with Monday, October 5 as the current date, `"leaving next Thursday"` was interpreted as Friday, October 9, and a four-night trip sometimes became three nights. The supervisor was also passing dates between agents as natural language, such as `"Thursday October 9"`, which gave the model another opportunity to misinterpret them.
 
-## 3. A hosted MCP server's tools hung
+Instead of asking the model to calculate dates itself, I started giving it a small lookup table with values like `next Thursday = 2026-10-08`, along with a two-week calendar. I also required dates passed between agents to use `YYYY-MM-DD`.
 
-**Symptom.** LiteAPI's MCP rate tools (`post_hotels_rates`, `post_hotels_min_rates`) never
-answered, even for 10 hotel IDs, and the resulting `httpx.ReadTimeout` crashed the LangGraph run.
+I tested both approaches five times using the same request and stubbed specialist agents. With only the calendar context, the supervisor produced incorrect dates in **3/5 runs**. With the lookup table and ISO date rule, it produced the correct dates in **5/5 runs**.
 
-**Diagnosis.** The same request to LiteAPI's REST API returned in **~3 s**, so the API was fine and
-the MCP wrapper was the problem. Hotel search and details through MCP worked normally.
+## 3. LiteAPI's MCP rate tools kept hanging
 
-**Fix.** A small LangChain tool (`get_hotel_rates`) calls the REST endpoint and returns a compact
-summary; MCP is still used for search. The MCP connection got a 60 s read timeout, and tool
-errors are returned to the model (`handle_tool_error`) instead of crashing the graph.
+The LiteAPI MCP tools for hotel rates (`post_hotels_rates` and `post_hotels_min_rates`) repeatedly hung, even when I only sent around 10 hotel IDs. Eventually the request would hit an `httpx.ReadTimeout`, which also caused the LangGraph run to fail.
 
-## 4. Too many tools, and tool results that were far too large
+To figure out where the problem was, I sent the same request directly to LiteAPI's REST API. It returned in about **3 seconds**, while other LiteAPI MCP tools like hotel search and hotel details also worked normally. That narrowed the issue down to the MCP rate tools rather than LiteAPI itself.
 
-**Symptom.** LiteAPI's MCP server exposes **91 tools**, including bookings, payments, vouchers
-and cancellations, all offered to the hotel agent. Separately, `get_data_hotel` returned
-**60K-250K characters per hotel** (every photo and room), and the agent called it three times
-in a row: well over 100K tokens added to a single answer.
+I worked around it by creating a small LangChain tool called `get_hotel_rates` that calls the REST endpoint directly and returns a compact result to the model. I kept MCP for hotel search, increased the MCP read timeout to 60 seconds, and added `handle_tool_error` so a failed tool call is returned to the model instead of crashing the entire graph.
 
-**Fix.** Read-only allowlists: the hotel agent gets 4 MCP tools plus the rates tool, the weather
-agent 5 of AccuWeather's 26. `get_data_hotel` is excluded; search results already include
-name, address and rating. A smoke test ([tests/smoke.py](../tests/smoke.py)) fails if a server renames an
-allowlisted tool or an agent receives a tool outside its allowlist.
+## 4. The agents had access to way too many tools
 
-## 5. API Gateway's 29-second limit vs. a 25-40 second agent
+LiteAPI's MCP server exposes **91 tools**, including tools for bookings, payments, cancellations, and vouchers. Most of those had nothing to do with what my hotel agent needed to accomplish.
 
-**Symptom.** A full trip plan takes 25-40 s (40 s measured on AgentCore). API Gateway REST
-integrations time out at ~29 s by default, so a synchronous API would fail on most trips.
+I also found that some tool responses were much larger than expected. `get_data_hotel`, for example, could return **60K-250K characters for a single hotel** because the response included every photo and room. When the agent called it three times in one request, it could add well over 100K tokens of unnecessary context.
 
-**Fix.** Asynchronous jobs: `POST /chat` stores a job and invokes a worker Lambda with
-`InvocationType=Event`, returning `202 {job_id}` immediately; clients poll `GET /chat/{job_id}`.
-The worker has async retries disabled so a failure can't save a turn twice. Alternatives
-considered: raising the timeout via a Service Quotas request (depends on approval, can lower
-throttle limits) or a Lambda Function URL (drops API keys and usage plans).
+I switched to strict read-only tool allowlists. The hotel agent now gets four MCP tools plus my hotel-rates tool, while the weather agent gets five of AccuWeather's 26 available tools. I removed `get_data_hotel` entirely because the normal search results already provide the hotel name, address, and rating.
 
-## 6. Conversation state was shared between users
+I also added a smoke test ([tests/smoke.py](https://github.com/christobobby25/travel-planner/blob/main/tests/smoke.py)) that catches cases where an MCP server renames one of the tools I depend on or an agent accidentally receives a tool outside its allowlist.
 
-**Symptom.** The first AgentCore entrypoint built one supervisor at startup and reused it for every
-request, so its message history belonged to whoever called it: two users would see each other's
-trips in context.
+## 5. The agent was slower than API Gateway's default timeout
 
-**Fix.** DynamoDB is the single source of conversation history. The worker sends the last 20
-turns with each message, and the runtime builds a fresh supervisor from them per request.
-**Verified:** "And on Sunday? Same city." answers for Denver when the history is sent, and asks
-"which city?" when it isn't.
+A complete trip plan usually takes around **25-40 seconds**, with one AgentCore test taking about 40 seconds. That's a problem because API Gateway REST integrations have a default timeout of roughly 29 seconds.
 
-## 7. Smaller things
+Instead of keeping the request synchronous, I changed the API to use an asynchronous job pattern.
 
-- **Duplicate output.** Sub-agents used Strands' default callback handler, so each answer was
-  streamed by the sub-agent, by the supervisor, and printed again. Sub-agents now run with
-  `callback_handler=None`.
-- **Deploy tooling.** The Python AgentCore starter toolkit is deprecated in favor of the npm
-  `@aws/agentcore` CLI (CDK-based). The old toolkit's `agentcore` command inside `.venv`
-  shadows the new one, so deploy from a shell without the venv.
-- **Packaging.** The CLI zips the code directory and always skips `.env*` and `.venv`, but not other
-  folders: a stray `.venv-1` would have added 333 MB, and CDK build output in `infra/` ~90 MB.
-- **Root vs. IAM user.** CDK's deploy roles can't be assumed by the root user; it falls back to root
-  credentials with warnings. Deploying as an IAM user works the way CDK expects.
-- **Account-wide side effects.** CDK's `RestApi` creates an account-level API Gateway CloudWatch
-  role by default; it's disabled here (`cloud_watch_role=False`) since this API doesn't need it.
+`POST /chat` creates a job, stores it, and asynchronously invokes a worker Lambda using `InvocationType=Event`. The API can then immediately return `202` with a `job_id`. The client checks `GET /chat/{job_id}` until the result is ready.
+
+I also disabled asynchronous retries on the worker so a failed invocation can't accidentally save the same conversation turn twice.
+
+I considered increasing the API Gateway timeout through Service Quotas, but that depends on approval and can affect throttling limits. I also considered Lambda Function URLs, but I wanted to keep API Gateway features such as API keys and usage plans.
+
+## 6. Conversation history was accidentally shared between users
+
+My first AgentCore entrypoint created one supervisor when the container started and reused it for every request. That meant the supervisor's message history wasn't isolated by user. In a multi-user application, one person's trip could potentially end up in another person's context.
+
+I changed the design so DynamoDB is the source of truth for conversation history. The worker loads the most recent 20 turns and sends them with each request, and the runtime creates a fresh supervisor using that history.
+
+I tested this with the follow-up question, `"And on Sunday? Same city."` When the previous conversation was included, the agent correctly understood that the city was Denver. Without the history, it asked which city I meant.
+
+## 7. A few smaller problems I ran into
+
+- **Duplicate output:** Strands' default callback handler caused responses to be printed by the sub-agent, then again by the supervisor, and then again by my application. Setting `callback_handler=None` on the sub-agents fixed it.
+- **AgentCore deployment:** The Python AgentCore starter toolkit has been replaced by the npm `@aws/agentcore` CLI. I also found that the old `agentcore` executable inside my `.venv` could shadow the newer CLI, so I deploy outside the virtual environment.
+- **Deployment package size:** The CLI automatically ignores `.env*` and `.venv`, but not every environment or build directory. A leftover `.venv-1` would have added about **333 MB**, while CDK output under `infra/` added roughly another **90 MB**.
+- **Root vs. IAM:** CDK deployment roles couldn't be assumed correctly when deploying as the AWS root user, which caused CDK to fall back to root credentials and generate warnings. Deploying through an IAM user worked as expected.
+- **CDK side effects:** CDK's `RestApi` construct creates an account-level API Gateway CloudWatch role by default. Since this API doesn't need it, I disabled it with `cloud_watch_role=False`.
